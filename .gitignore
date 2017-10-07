@@ -1,0 +1,4 @@
+*.swp
+results/**
+test_stencil
+full_times.csv

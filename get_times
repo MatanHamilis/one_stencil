@@ -1,0 +1,22 @@
+#!/bin/bash
+./check.sh
+if [ $? -ne 0 ]; then
+	exit -1
+fi
+mkdir -p results
+rm ./results/*
+TEST_SIZE=$((2**24))
+for j in $(seq 1 20);
+do
+	for k in $(seq 1 8);
+	do
+		make clean
+		make test_stencil AF="-DK_IN_COMPILE -Dk=${j}  -DOUTPUT_PER_THREAD=${k}"
+		./test_stencil RC ${TEST_SIZE} >> ./results/rc_times_${k}
+		./test_stencil NO_RC ${TEST_SIZE} >> ./results/shmem_times_${k}
+	done
+done
+
+cd results
+echo * | sed 's/ /,/g' > ../full_times.csv
+paste -d',' * >> ../full_times.csv
