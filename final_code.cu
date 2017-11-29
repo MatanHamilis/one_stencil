@@ -54,7 +54,7 @@ int main(int argc, char** argv)
 	int withRc = 0;
 	if (argc != 3)
 	{
-		printf("Usage: %s [RC/NO_RC] [TEST_SIZE > 1000]\n", argv[0]);
+		printf("Usage: %s [RC/NO_RC] [TEST_SIZE > 10000]\n", argv[0]);
 		exit(-1);
 	}
 
@@ -69,7 +69,7 @@ int main(int argc, char** argv)
 	int *B = new int[test_size - 2];
 
 	fill_array(A, test_size);
-	fill_array(B, test_size);
+	fill_array(B, test_size - 2);
 	float sum = 0;
 	float min = 0;
 	float max = 0;
@@ -83,7 +83,6 @@ int main(int argc, char** argv)
 			max = current;
 		}
 
-		//printf("%f\n", current);
 		sum += current;
 
 		if (min > current)
@@ -228,7 +227,7 @@ __global__ void one_stencil_with_rc (int *A, int *B, int sizeOfA)
 	
 	// The Id of the thread in the scope of the grid.
 	int globalId = localId + startOfWarp;
-	
+
 	if (globalId >= sizeOfA)
 		return;
 	
@@ -242,14 +241,31 @@ __global__ void one_stencil_with_rc (int *A, int *B, int sizeOfA)
 	// Each thread computes a single output.
 	int ac = 0;
 	int toShare = rc[0];
+
+	bool isLastWarp = sizeOfA - startOfWarp < WARP_SIZE;
+
+	// The number of threads in the warp which are inactive.
+	// Possibly bigger than zero only for the last warp.
+	int inactiveThreadsInWarp = isLastWarp ? startOfWarp + WARP_SIZE - sizeOfA : 0;
+
+
+	// Accessing register cache.
+	// We use a precomputed active mask.
+	// This is because otherwise only a subset of active threads return from
+	//	the __activemask() call, which will resemble a wrong picture of
+	//	the currently active threads in the warp.
+	//	notice that the active mask does not change along the following
+	//	loop so we claculate it just once.
+	//	Please refer to the cuda developers guide for futher information.
+	unsigned mask = //__activemask(); <-- Wrong!
+		 (0xffffffff) >> (inactiveThreadsInWarp);
+
 	for (int i = 0 ; i < 3 ; ++i)
 	{
 		// Threads decide what value will be published in the following access.
 		if (localId < i)
 			toShare = rc[1];
 
-		// Accessing register cache.
-		unsigned mask = __activemask();
 		ac += __shfl_sync(mask, toShare, (localId + i) % WARP_SIZE);
 	}
 
@@ -307,7 +323,6 @@ float host_k_stencil (int *A, int *B, int sizeOfA, int withRc)
 	cudaFree(d_A);
 	cudaFree(d_B);
 	return ms;
-	
 }
 
 __global__ void k_stencil (int *A, int *B, int sizeOfA)
@@ -361,6 +376,8 @@ __global__ void k_stencil (int *A, int *B, int sizeOfA)
 // Writes output into B.
 __global__ void k_stencil_with_rc (int *A, int *B, int sizeOfA)
 {
+	int sizeOfB = sizeOfA - k;
+
 	// Declaring local register cache.
 	int rc[LOCAL_REGISTER_SIZE];
 
@@ -381,29 +398,52 @@ __global__ void k_stencil_with_rc (int *A, int *B, int sizeOfA)
 #pragma unroll
 	for (int i = 0 ; i < OUTPUT_PER_THREAD ; ++i)
 	{
+		if (globalId + WARP_SIZE*i >= sizeOfA)
+		{
+			continue;
+		}
 		rc[i] = A[(int)(globalId + WARP_SIZE*i)];
 	}
 
 	rc[LOCAL_REGISTER_SIZE - 1] =  A[OUTPUT_PER_THREAD*WARP_SIZE + globalId];
 	// Each thread computes a single output.
 
+	bool warpHasInactiveThreads = sizeOfA - startOfWarp < WARP_SIZE;
+
+	// The number of threads in the warp which are inactive.
+	// Possibly bigger than zero only for the last warp.
+	int inactiveThreadsInWarp = warpHasInactiveThreads ? startOfWarp + WARP_SIZE - sizeOfA : 0;
+
+
+	// Accessing register cache.
+	// We use a precomputed active mask.
+	// This is because otherwise only a subset of active threads return from
+	//	the __activemask() call, which will resemble a wrong picture of
+	//	the currently active threads in the warp.
+	//	notice that the active mask does not change along the following
+	//	loop so we claculate it just once.
+	//	Please refer to the cuda developers guide for futher information.
+	unsigned mask = //__activemask(); <-- Wrong!
+		 (0xffffffff) >> (inactiveThreadsInWarp);
 #pragma unroll
 	for (int j = 0 ; j < OUTPUT_PER_THREAD ; ++j)
 	{
-		
 		int toShare = rc[j];
 		int ac = 0;
 #pragma unroll
 		for (int i = 0 ; i < k + 1 ; ++i)
 		{
 			// Threads decide what value will be published in the following access.
-			toShare += (i==localId)*(rc[j+1] - rc[j]);
-			// Accessing register cache.
-			unsigned mask = __activemask();
 			ac += __shfl_sync(mask, toShare, (localId + i) & (WARP_SIZE - 1));
+			toShare += (i==localId)*(rc[j+1] - rc[j]);
 		}
 
-			B[globalId + j*WARP_SIZE] = ac ;
+		if (globalId + j*WARP_SIZE >= sizeOfB)
+		{
+			continue;
+		}
+
+		B[globalId + j*WARP_SIZE] = ac ;
 			
 	}
 }
